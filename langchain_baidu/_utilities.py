@@ -1,618 +1,175 @@
-"""Util that calls Tavily Search API.
+"""Utilities for interacting with Baidu Search."""
 
-In order to set this up, follow instructions at:
-https://docs.tavily.com/docs/tavily-api/introduction
-"""
+from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Literal, Optional, Union
+import asyncio
+import re
+import time
+import unicodedata
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote_plus
 
-import aiohttp
 import requests
-from langchain_core.utils import get_from_dict_or_env
-from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
+from bs4 import BeautifulSoup
+from bs4.element import Tag
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+DEFAULT_HEADERS: Dict[str, str] = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/68.0.3440.106 Safari/537.36"
+    ),
+    "Referer": "https://www.baidu.com/",
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+
+BAIDU_HOST_URL = "https://www.baidu.com"
+BAIDU_SEARCH_URL = f"{BAIDU_HOST_URL}/s?ie=utf-8&tn=baidu&wd="
 
 
-TAVILY_API_URL: str = "https://api.tavily.com"
+class BaiduSearchAPIWrapper(BaseModel):
+    """Wrapper responsible for scraping search results from Baidu."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-class TavilySearchAPIWrapper(BaseModel):
-    """Wrapper for Tavily Search API."""
+    max_results: int = Field(default=5, ge=1)
+    abstract_max_length: int = Field(default=300, ge=50)
+    timeout: int = Field(default=10, ge=1)
+    headers: Dict[str, str] = Field(default_factory=lambda: DEFAULT_HEADERS.copy())
+    baidu_host_url: str = Field(default=BAIDU_HOST_URL)
+    baidu_search_url: str = Field(default=BAIDU_SEARCH_URL)
 
-    tavily_api_key: SecretStr
-    api_base_url: Optional[str] = None
+    _session: requests.Session = PrivateAttr()
 
-    model_config = ConfigDict(
-        extra="forbid",
-    )
+    def __init__(self, **data: Any) -> None:  # pragma: no cover - delegation to BaseModel
+        super().__init__(**data)
+        self._session = requests.Session()
+        self._session.headers.update(self.headers)
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
-        """Validate that api key and endpoint exists in environment."""
-        tavily_api_key = get_from_dict_or_env(
-            values, "tavily_api_key", "TAVILY_API_KEY"
-        )
-        values["tavily_api_key"] = tavily_api_key
+    def raw_results(self, query: str, num_results: Optional[int] = None) -> Dict[str, Any]:
+        """Return cleaned Baidu search results for the provided query."""
 
-        return values
+        if not query:
+            raise ValueError("Query must be a non-empty string.")
 
-    def raw_results(
-        self,
-        query: str,
-        max_results: Optional[int],
-        search_depth: Optional[Literal["basic", "advanced"]],
-        include_domains: Optional[List[str]],
-        exclude_domains: Optional[List[str]],
-        include_answer: Optional[Union[bool, Literal["basic", "advanced"]]],
-        include_raw_content: Optional[Union[bool, Literal["markdown", "text"]]],
-        include_images: Optional[bool],
-        include_image_descriptions: Optional[bool],
-        include_favicon: Optional[bool],
-        topic: Optional[Literal["general", "news", "finance"]],
-        time_range: Optional[Literal["day", "week", "month", "year"]],
-        country: Optional[str],
-        auto_parameters: Optional[bool],
-        start_date: Optional[str],
-        end_date: Optional[str],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        params = {
+        expected_results = num_results or self.max_results
+        if expected_results <= 0:
+            return {"query": query, "results": [], "response_time": 0.0}
+
+        start = time.perf_counter()
+        results = self._search(query, expected_results)
+        end = time.perf_counter() - start
+
+        return {
             "query": query,
-            "max_results": max_results,
-            "search_depth": search_depth,
-            "include_domains": include_domains,
-            "exclude_domains": exclude_domains,
-            "include_answer": include_answer,
-            "include_raw_content": include_raw_content,
-            "include_images": include_images,
-            "include_image_descriptions": include_image_descriptions,
-            "include_favicon": include_favicon,
-            "topic": topic,
-            "time_range": time_range,
-            "country": country,
-            "auto_parameters": auto_parameters,
-            "start_date": start_date,
-            "end_date": end_date,
-            **kwargs,
+            "results": results,
+            "response_time": round(end, 3),
         }
-
-        # Remove None values
-        params = {k: v for k, v in params.items() if v is not None}
-
-        headers = {
-            "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-            "Content-Type": "application/json",
-            "X-Client-Source": "langchain-tavily",
-        }
-        base_url = self.api_base_url or TAVILY_API_URL
-        response = requests.post(
-            # type: ignore
-            f"{base_url}/search",
-            json=params,
-            headers=headers,
-        )
-        if response.status_code != 200:
-            detail = response.json().get("detail", {})
-            error_message = (
-                detail.get("error") if isinstance(detail, dict) else "Unknown error"
-            )
-            raise ValueError(f"Error {response.status_code}: {error_message}")
-        return response.json()
 
     async def raw_results_async(
-        self,
-        query: str,
-        max_results: Optional[int],
-        search_depth: Optional[Literal["basic", "advanced"]],
-        include_domains: Optional[List[str]],
-        exclude_domains: Optional[List[str]],
-        include_answer: Optional[Union[bool, Literal["basic", "advanced"]]],
-        include_raw_content: Optional[Union[bool, Literal["markdown", "text"]]],
-        include_images: Optional[bool],
-        include_image_descriptions: Optional[bool],
-        include_favicon: Optional[bool],
-        topic: Optional[Literal["general", "news", "finance"]],
-        time_range: Optional[Literal["day", "week", "month", "year"]],
-        country: Optional[str],
-        auto_parameters: Optional[bool],
-        start_date: Optional[str],
-        end_date: Optional[str],
-        **kwargs: Any,
+        self, query: str, num_results: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Get results from the Tavily Search API asynchronously."""
+        """Async version of :meth:`raw_results`."""
 
-        # Function to perform the API call
-        async def fetch() -> str:
-            params = {
-                "query": query,
-                "max_results": max_results,
-                "search_depth": search_depth,
-                "include_domains": include_domains,
-                "exclude_domains": exclude_domains,
-                "include_answer": include_answer,
-                "include_raw_content": include_raw_content,
-                "include_images": include_images,
-                "include_image_descriptions": include_image_descriptions,
-                "include_favicon": include_favicon,
-                "topic": topic,
-                "time_range": time_range,
-                "country": country,
-                "auto_parameters": auto_parameters,
-                "start_date": start_date,
-                "end_date": end_date,
-                **kwargs,
-            }
+        return await asyncio.to_thread(self.raw_results, query, num_results)
 
-            # Remove None values
-            params = {k: v for k, v in params.items() if v is not None}
+    def clean_text(self, value: Optional[str]) -> str:
+        """Clean text fields by removing control chars and collapsing whitespace."""
 
-            headers = {
-                "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-                "Content-Type": "application/json",
-                "X-Client-Source": "langchain-tavily",
-            }
-            base_url = self.api_base_url or TAVILY_API_URL
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{base_url}/search", json=params, headers=headers
-                ) as res:
-                    if res.status == 200:
-                        data = await res.text()
-                        return data
-                    else:
-                        raise Exception(f"Error {res.status}: {res.reason}")
+        if not value:
+            return ""
 
-        results_json_str = await fetch()
-
-        return json.loads(results_json_str)
-
-    """Wrapper for Tavily Extract API."""
-
-    tavily_api_key: SecretStr
-    api_base_url: Optional[str] = None
-
-    model_config = ConfigDict(
-        extra="forbid",
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
-        """Validate that api key and endpoint exists in environment."""
-        tavily_api_key = get_from_dict_or_env(
-            values, "tavily_api_key", "TAVILY_API_KEY"
+        without_controls = "".join(
+            ch for ch in value if unicodedata.category(ch)[0] != "C"
         )
-        values["tavily_api_key"] = tavily_api_key
+        without_newlines = without_controls.replace("\r", " ").replace("\n", " ")
+        compacted = re.sub(r"\s+", " ", without_newlines)
+        return compacted.strip()
 
-        return values
+    def _search(self, keyword: str, num_results: int) -> List[Dict[str, Any]]:
+        """Iterate through Baidu result pages until enough results are collected."""
 
-    def raw_results(
-        self,
-        urls: List[str],
-        extract_depth: Optional[Literal["basic", "advanced"]],
-        include_images: Optional[bool],
-        include_favicon: Optional[bool],
-        format: Optional[str],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        params = {
-            "urls": urls,
-            "include_images": include_images,
-            "include_favicon": include_favicon,
-            "extract_depth": extract_depth,
-            "format": format,
-            **kwargs,
-        }
+        results: List[Dict[str, Any]] = []
+        page_url = self._build_search_url(keyword)
+        rank_start = 0
 
-        # Remove None values
-        params = {k: v for k, v in params.items() if v is not None}
+        while len(results) < num_results and page_url:
+            page_results, next_url = self._parse_html(page_url, rank_start)
+            results.extend(page_results)
+            rank_start = len(results)
+            page_url = next_url
 
-        headers = {
-            "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-            "Content-Type": "application/json",
-            "X-Client-Source": "langchain-tavily",
-        }
+        return results[:num_results]
 
-        base_url = self.api_base_url or TAVILY_API_URL
-        response = requests.post(
-            # type: ignore
-            f"{base_url}/extract",
-            json=params,
-            headers=headers,
-        )
+    def _build_search_url(self, keyword: str) -> str:
+        encoded = quote_plus(keyword)
+        return f"{self.baidu_search_url}{encoded}"
 
-        if response.status_code != 200:
-            detail = response.json().get("detail", {})
-            error_message = (
-                detail.get("error") if isinstance(detail, dict) else "Unknown error"
+    def _parse_html(
+        self, url: str, rank_start: int
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        response = self._session.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        response.encoding = "utf-8"
+        root = BeautifulSoup(response.text, "html.parser")
+
+        content_left = root.find("div", id="content_left")
+        if content_left is None:
+            return [], None
+
+        parsed: List[Dict[str, Any]] = []
+        for div in content_left.contents:
+            if not isinstance(div, Tag):
+                continue
+
+            class_list = div.get("class", [])
+            if not class_list or "c-container" not in class_list:
+                continue
+
+            title_tag = div.find("h3")
+            link_tag = title_tag.find("a") if title_tag else None
+            title = self.clean_text(title_tag.get_text(" ")) if title_tag else ""
+            url_value = (
+                link_tag.get("href", "") if link_tag is not None else ""
             )
-            raise ValueError(f"Error {response.status_code}: {error_message}")
-        return response.json()
 
-    async def raw_results_async(
-        self,
-        urls: List[str],
-        include_images: Optional[bool],
-        include_favicon: Optional[bool],
-        extract_depth: Optional[Literal["basic", "advanced"]],
-        format: Optional[str],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Get results from the Tavily Extract API asynchronously."""
-
-        # Function to perform the API call
-        async def fetch() -> str:
-            params = {
-                "urls": urls,
-                "include_images": include_images,
-                "include_favicon": include_favicon,
-                "extract_depth": extract_depth,
-                "format": format,
-                **kwargs,
-            }
-
-            # Remove None values
-            params = {k: v for k, v in params.items() if v is not None}
-
-            headers = {
-                "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-                "Content-Type": "application/json",
-                "X-Client-Source": "langchain-tavily",
-            }
-
-            base_url = self.api_base_url or TAVILY_API_URL
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{base_url}/extract", json=params, headers=headers
-                ) as res:
-                    if res.status == 200:
-                        data = await res.text()
-                        return data
-                    else:
-                        raise Exception(f"Error {res.status}: {res.reason}")
-
-        results_json_str = await fetch()
-
-        return json.loads(results_json_str)
-
-
-class TavilyCrawlAPIWrapper(BaseModel):
-    """Wrapper for Tavily Crawl API."""
-
-    tavily_api_key: SecretStr
-    api_base_url: Optional[str] = None
-
-    model_config = ConfigDict(
-        extra="forbid",
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
-        """Validate that api key and endpoint exists in environment."""
-        tavily_api_key = get_from_dict_or_env(
-            values, "tavily_api_key", "TAVILY_API_KEY"
-        )
-        values["tavily_api_key"] = tavily_api_key
-
-        return values
-
-    def raw_results(
-        self,
-        url: str,
-        max_depth: Optional[int],
-        max_breadth: Optional[int],
-        limit: Optional[int],
-        instructions: Optional[str],
-        select_paths: Optional[List[str]],
-        select_domains: Optional[List[str]],
-        exclude_paths: Optional[List[str]],
-        exclude_domains: Optional[List[str]],
-        allow_external: Optional[bool],
-        include_images: Optional[bool],
-        categories: Optional[
-            List[
-                Literal[
-                    "Careers",
-                    "Blogs",
-                    "Documentation",
-                    "About",
-                    "Pricing",
-                    "Community",
-                    "Developers",
-                    "Contact",
-                    "Media",
-                ]
-            ]
-        ],
-        extract_depth: Optional[Literal["basic", "advanced"]],
-        include_favicon: Optional[bool],
-        format: Optional[str],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        params = {
-            "url": url,
-            "max_depth": max_depth,
-            "max_breadth": max_breadth,
-            "limit": limit,
-            "instructions": instructions,
-            "select_paths": select_paths,
-            "select_domains": select_domains,
-            "exclude_paths": exclude_paths,
-            "exclude_domains": exclude_domains,
-            "allow_external": allow_external,
-            "include_images": include_images,
-            "categories": categories,
-            "extract_depth": extract_depth,
-            "include_favicon": include_favicon,
-            "format": format,
-            **kwargs,
-        }
-
-        # Remove None values
-        params = {k: v for k, v in params.items() if v is not None}
-
-        headers = {
-            "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-            "Content-Type": "application/json",
-            "X-Client-Source": "langchain-tavily",
-        }
-
-        base_url = self.api_base_url or TAVILY_API_URL
-        response = requests.post(
-            # type: ignore
-            f"{base_url}/crawl",
-            json=params,
-            headers=headers,
-        )
-
-        if response.status_code != 200:
-            detail = response.json().get("detail", {})
-            error_message = (
-                detail.get("error") if isinstance(detail, dict) else "Unknown error"
+            abstract_tag = div.find("div", class_="c-abstract") or div.find("div")
+            abstract = (
+                self.clean_text(abstract_tag.get_text(" ")) if abstract_tag else ""
             )
-            raise ValueError(f"Error {response.status_code}: {error_message}")
-        return response.json()
 
-    async def raw_results_async(
-        self,
-        url: str,
-        max_depth: Optional[int],
-        max_breadth: Optional[int],
-        limit: Optional[int],
-        instructions: Optional[str],
-        select_paths: Optional[List[str]],
-        select_domains: Optional[List[str]],
-        exclude_paths: Optional[List[str]],
-        exclude_domains: Optional[List[str]],
-        allow_external: Optional[bool],
-        include_images: Optional[bool],
-        categories: Optional[
-            List[
-                Literal[
-                    "Careers",
-                    "Blogs",
-                    "Documentation",
-                    "About",
-                    "Pricing",
-                    "Community",
-                    "Developers",
-                    "Contact",
-                    "Media",
-                ]
-            ]
-        ],
-        extract_depth: Optional[Literal["basic", "advanced"]],
-        include_favicon: Optional[bool],
-        format: Optional[str],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Get results from the Tavily Crawl API asynchronously."""
+            if len(abstract) > self.abstract_max_length:
+                abstract = abstract[: self.abstract_max_length].rstrip() + "…"
 
-        # Function to perform the API call
-        async def fetch() -> str:
-            params = {
-                "url": url,
-                "max_depth": max_depth,
-                "max_breadth": max_breadth,
-                "limit": limit,
-                "instructions": instructions,
-                "select_paths": select_paths,
-                "select_domains": select_domains,
-                "exclude_paths": exclude_paths,
-                "exclude_domains": exclude_domains,
-                "allow_external": allow_external,
-                "include_images": include_images,
-                "categories": categories,
-                "extract_depth": extract_depth,
-                "include_favicon": include_favicon,
-                "format": format,
-                **kwargs,
-            }
-
-            # Remove None values
-            params = {k: v for k, v in params.items() if v is not None}
-
-            headers = {
-                "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-                "Content-Type": "application/json",
-                "X-Client-Source": "langchain-tavily",
-            }
-
-            base_url = self.api_base_url or TAVILY_API_URL
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{base_url}/crawl", json=params, headers=headers
-                ) as res:
-                    if res.status == 200:
-                        data = await res.text()
-                        return data
-                    else:
-                        raise Exception(f"Error {res.status}: {res.reason}")
-
-        results_json_str = await fetch()
-
-        return json.loads(results_json_str)
-
-
-class TavilyMapAPIWrapper(BaseModel):
-    """Wrapper for Tavily Map API."""
-
-    tavily_api_key: SecretStr
-    api_base_url: Optional[str] = None
-
-    model_config = ConfigDict(
-        extra="forbid",
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
-        """Validate that api key and endpoint exists in environment."""
-        tavily_api_key = get_from_dict_or_env(
-            values, "tavily_api_key", "TAVILY_API_KEY"
-        )
-        values["tavily_api_key"] = tavily_api_key
-
-        return values
-
-    def raw_results(
-        self,
-        url: str,
-        max_depth: Optional[int],
-        max_breadth: Optional[int],
-        limit: Optional[int],
-        instructions: Optional[str],
-        select_paths: Optional[List[str]],
-        select_domains: Optional[List[str]],
-        exclude_paths: Optional[List[str]],
-        exclude_domains: Optional[List[str]],
-        allow_external: Optional[bool],
-        categories: Optional[
-            List[
-                Literal[
-                    "Careers",
-                    "Blogs",
-                    "Documentation",
-                    "About",
-                    "Pricing",
-                    "Community",
-                    "Developers",
-                    "Contact",
-                    "Media",
-                ]
-            ]
-        ],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        params = {
-            "url": url,
-            "max_depth": max_depth,
-            "max_breadth": max_breadth,
-            "limit": limit,
-            "instructions": instructions,
-            "select_paths": select_paths,
-            "select_domains": select_domains,
-            "exclude_paths": exclude_paths,
-            "exclude_domains": exclude_domains,
-            "allow_external": allow_external,
-            "categories": categories,
-            **kwargs,
-        }
-
-        # Remove None values
-        params = {k: v for k, v in params.items() if v is not None}
-
-        headers = {
-            "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-            "Content-Type": "application/json",
-            "X-Client-Source": "langchain-tavily",
-        }
-
-        base_url = self.api_base_url or TAVILY_API_URL
-        response = requests.post(
-            # type: ignore
-            f"{base_url}/map",
-            json=params,
-            headers=headers,
-        )
-
-        if response.status_code != 200:
-            detail = response.json().get("detail", {})
-            error_message = (
-                detail.get("error") if isinstance(detail, dict) else "Unknown error"
+            parsed.append(
+                {
+                    "title": title,
+                    "abstract": abstract,
+                    "url": self._normalize_url(url_value),
+                    "rank": rank_start + len(parsed) + 1,
+                }
             )
-            raise ValueError(f"Error {response.status_code}: {error_message}")
-        return response.json()
 
-    async def raw_results_async(
-        self,
-        url: str,
-        max_depth: Optional[int],
-        max_breadth: Optional[int],
-        limit: Optional[int],
-        instructions: Optional[str],
-        select_paths: Optional[List[str]],
-        select_domains: Optional[List[str]],
-        exclude_paths: Optional[List[str]],
-        exclude_domains: Optional[List[str]],
-        allow_external: Optional[bool],
-        categories: Optional[
-            List[
-                Literal[
-                    "Careers",
-                    "Blogs",
-                    "Documentation",
-                    "About",
-                    "Pricing",
-                    "Community",
-                    "Developers",
-                    "Contact",
-                    "Media",
-                ]
-            ]
-        ],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Get results from the Tavily Map API asynchronously."""
+        next_link = root.find_all("a", class_="n")
+        next_url = None
+        if next_link:
+            candidate = next_link[-1]
+            if "下一页" in candidate.get_text(" "):
+                next_url = self._normalize_url(candidate.get("href", ""))
 
-        # Function to perform the API call
-        async def fetch() -> str:
-            params = {
-                "url": url,
-                "max_depth": max_depth,
-                "max_breadth": max_breadth,
-                "limit": limit,
-                "instructions": instructions,
-                "select_paths": select_paths,
-                "select_domains": select_domains,
-                "exclude_paths": exclude_paths,
-                "exclude_domains": exclude_domains,
-                "allow_external": allow_external,
-                "categories": categories,
-                **kwargs,
-            }
+        return parsed, next_url
 
-            # Remove None values
-            params = {k: v for k, v in params.items() if v is not None}
+    def _normalize_url(self, url: str) -> str:
+        if not url:
+            return ""
+        if url.startswith("http"):
+            return url
+        if url.startswith("//"):
+            return f"https:{url}"
+        if url.startswith("/"):
+            return f"{self.baidu_host_url.rstrip('/')}{url}"
+        return url
 
-            headers = {
-                "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
-                "Content-Type": "application/json",
-                "X-Client-Source": "langchain-tavily",
-            }
-            base_url = self.api_base_url or TAVILY_API_URL
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{base_url}/map", json=params, headers=headers
-                ) as res:
-                    if res.status == 200:
-                        data = await res.text()
-                        return data
-                    else:
-                        raise Exception(f"Error {res.status}: {res.reason}")
-
-        results_json_str = await fetch()
-
-        return json.loads(results_json_str)

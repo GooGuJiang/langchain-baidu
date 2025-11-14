@@ -3,14 +3,14 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "langchain-tavily"
+name = "langchain-baidu"
 version = "0.2.13"
-description = "An integration package connecting Tavily and LangChain"
+description = "LangChain tool that surfaces Baidu search results"
 authors = []
 readme = "README.md"
-repository = "https://github.com/tavily-ai/langchain-tavily"
+repository = "https://github.com/tavily-ai/langchain-baidu"
 license = "MIT"
-include = ["langchain_tavily/py.typed"]
+include = ["langchain_baidu/py.typed"]
 
 [tool.mypy]
 disallow_untyped_defs = "True"
@@ -19,8 +19,8 @@ disallow_untyped_defs = "True"
 python = ">=3.10,<4.0"
 langchain-core = ">=0.3.15,<2.0.0"
 langchain = ">=0.3.20,<2.0.0"
-aiohttp = "^3.11.14"
 requests = "^2.32.3"
+beautifulsoup4 = "^4.12.3"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "T201"]
