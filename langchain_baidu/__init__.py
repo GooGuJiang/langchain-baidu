@@ -1,16 +1,15 @@
+"""LangChain Baidu integration."""
+
 from importlib import metadata
 from typing import List
 
-from langchain_tavily.tavily_search import TavilySearch
+from langchain_baidu.baidu_search import BaiduSearch
 
 try:
     __version__: str = metadata.version(__package__)
-except metadata.PackageNotFoundError:
-    # Case where package metadata is not available.
+except metadata.PackageNotFoundError:  # pragma: no cover - package metadata missing
     __version__ = ""
-del metadata  # optional, avoids polluting the results of dir(__package__)
 
-__all__: List[str] = [
-    "TavilySearch",
-    "__version__",
-]
+del metadata
+
+__all__: List[str] = ["BaiduSearch", "__version__"]
