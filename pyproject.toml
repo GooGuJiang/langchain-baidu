@@ -4,11 +4,11 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "langchain-baidu"
-version = "0.2.13"
+version = "0.1.0"
 description = "LangChain tool that surfaces Baidu search results"
 authors = []
 readme = "README.md"
-repository = "https://github.com/tavily-ai/langchain-baidu"
+repository = "https://github.com/GooGuJiang/langchain-baidu"
 license = "MIT"
 include = ["langchain_baidu/py.typed"]
 
