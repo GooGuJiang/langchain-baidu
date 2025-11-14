@@ -6,8 +6,11 @@
 本项目中与百度搜索结果获取相关的部分实现，参考并复用自项目：[`amazingcoderpro/python-baidusearch`](https://github.com/amazingcoderpro/python-baidusearch)。
 
 ⚠ **重要说明**
+
 本项目通过模拟浏览器行为抓取百度页面，属于爬虫方式。
+
 请避免高频或批量调用，以免触发反爬或造成不必要的负载。
+
 如需稳定、高并发或商业使用，请申请百度官方提供的接口服务。
 
 ---
@@ -145,6 +148,6 @@ response = executor.invoke(
 
 本项目中与百度搜索结果获取相关的逻辑，部分参考并复用自：
 
-* [`amazingcoderpro/python-baidusearch`](https://github://github.com/amazingcoderpro/python-baidusearch)
+* [`amazingcoderpro/python-baidusearch`](https://github.com/amazingcoderpro/python-baidusearch)
 
 感谢原项目作者的工作和开源贡献。
