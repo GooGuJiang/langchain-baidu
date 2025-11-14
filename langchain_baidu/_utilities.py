@@ -1,4 +1,4 @@
-"""Util that calls Tavily Search + Extract API.
+"""Util that calls Tavily Search API.
 
 In order to set this up, follow instructions at:
 https://docs.tavily.com/docs/tavily-api/introduction
@@ -167,8 +167,6 @@ class TavilySearchAPIWrapper(BaseModel):
 
         return json.loads(results_json_str)
 
-
-class TavilyExtractAPIWrapper(BaseModel):
     """Wrapper for Tavily Extract API."""
 
     tavily_api_key: SecretStr
